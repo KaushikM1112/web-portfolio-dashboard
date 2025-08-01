@@ -1,0 +1,26 @@
+{
+  "Ticker": [
+    "NDQ.AX",
+    "VGS.AX",
+    "A200.AX",
+    "BTC-USD"
+  ],
+  "Quantity": [
+    2.0,
+    2.0,
+    3.0,
+    0.05
+  ],
+  "CostBasis_AUD": [
+    33.5,
+    95.0,
+    120.0,
+    92000.0
+  ],
+  "Notes": [
+    "tech tilt",
+    "global",
+    "aussie core",
+    "btc core"
+  ]
+}
