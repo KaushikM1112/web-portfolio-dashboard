@@ -1,31 +1,4 @@
-"""
-Inas Investing – Live Portfolio Tracker (Web Dashboard)
-Streamlit app to track a mixed high‑risk portfolio (ASX ETFs & stocks, crypto, and AU crypto ETFs)
-with near‑real‑time refresh and hour‑by‑hour performance.
 
-How to run locally:
-1) Save this file as app.py
-2) Create `requirements.txt` with:
-   yfinance
-   streamlit
-   pandas
-   numpy
-   pytz
-3) Install deps:  `pip install -r requirements.txt`
-4) Run:  `streamlit run app.py`
-
-How to deploy to Streamlit Community Cloud (free):
-1) Create a GitHub repo and add `app.py` and `requirements.txt`.
-2) Go to https://share.streamlit.io, connect your GitHub, choose the repo and `app.py` as the entry point.
-3) (Optional) Add secrets later if you integrate Sheets/DB.
-4) Click Deploy.
-
-Notes:
-• ASX tickers use suffix .AX (e.g., NDQ.AX, VGS.AX).  
-• Crypto uses Yahoo symbols like BTC-USD, ETH-USD.  
-• Hourly tracking uses Yahoo Finance 1h interval data (where available).  
-• Market data isn't guaranteed and can be delayed; confirm prices in your broker.
-"""
 from datetime import datetime, timedelta
 import json
 import numpy as np
@@ -36,25 +9,29 @@ import streamlit as st
 
 AUS_TZ = pytz.timezone("Australia/Melbourne")
 
-# ---------- User-configurable defaults ----------
+# --- Safe JSON export helper to avoid NaN/Inf issues in downloads ---
+def df_to_json_str(df: pd.DataFrame) -> str:
+    """Convert a holdings DataFrame to a JSON string safely for download."""
+    df = df.copy()
+    if "Ticker" in df.columns:
+        df = df[~df["Ticker"].isna() & (df["Ticker"].astype(str).str.strip() != "")]
+    for col in ("Quantity", "CostBasis_AUD"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.replace([np.inf, -np.inf], np.nan).where(pd.notnull(df), None)
+    data = df.to_dict(orient="list")
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
 DEFAULT_TICKERS = [
-    # Tech / growth ETFs (ASX)
     "NDQ.AX", "VGS.AX", "A200.AX", "FANG.AX",
-    # Thematic/speculative ETFs (ASX)
     "CRYP.AX", "HACK.AX", "ROBO.AX",
-    # Leveraged ETFs (ASX)
     "GGUS.AX", "GEAR.AX",
-    # Small caps (ASX examples)
     "ZIP.AX", "BNR.AX", "IVZ.AX",
-    # Crypto (direct)
     "BTC-USD", "ETH-USD",
-    # AU crypto ETFs
     "EBTC.AX", "ETHT.AX",
 ]
-
 HOLDINGS_PATH = "holdings.json"
 
-# ---------- Persistence helpers ----------
 def load_holdings(path: str = HOLDINGS_PATH) -> pd.DataFrame:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -79,27 +56,21 @@ def save_holdings(df: pd.DataFrame, path: str = HOLDINGS_PATH) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ---------- Pricing helpers ----------
 @st.cache_data(ttl=60)
 def fetch_quotes(tickers: list[str]) -> pd.DataFrame:
-    """Fetch latest quote snapshot for tickers. Cached for 60 seconds."""
     if not tickers:
         return pd.DataFrame()
     t = yf.Tickers(" ".join(tickers))
     rows = []
     for tk, obj in t.tickers.items():
         try:
-            info = obj.fast_info  # quicker snapshot
-            price = info.get("last_price")
-            currency = info.get("currency")
-            prev_close = info.get("previous_close")
-            open_price = info.get("open")
+            info = obj.fast_info
             rows.append({
                 "Ticker": tk,
-                "Price": price,
-                "PrevClose": prev_close,
-                "Open": open_price,
-                "Currency": currency,
+                "Price": info.get("last_price"),
+                "PrevClose": info.get("previous_close"),
+                "Open": info.get("open"),
+                "Currency": info.get("currency"),
             })
         except Exception:
             rows.append({"Ticker": tk, "Price": np.nan, "PrevClose": np.nan, "Open": np.nan, "Currency": None})
@@ -107,7 +78,6 @@ def fetch_quotes(tickers: list[str]) -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def fetch_hourly_change(ticker: str) -> float:
-    """Return % change over the last hour using 1h interval, if available."""
     try:
         end = datetime.now(tz=pytz.UTC)
         start = end - timedelta(hours=6)
@@ -124,43 +94,28 @@ def fetch_hourly_change(ticker: str) -> float:
 
 @st.cache_data(ttl=120)
 def get_audusd() -> float:
-    """Approximate AUDUSD FX rate to convert USD -> AUD."""
     try:
         fx = yf.download("AUDUSD=X", period="1d", interval="5m", progress=False)["Close"].dropna()
         return float(fx.iloc[-1])
     except Exception:
-        return 0.67  # fallback
+        return 0.67
 
 def compute_portfolio(holdings: pd.DataFrame, quotes: pd.DataFrame) -> pd.DataFrame:
     df = holdings.merge(quotes, on="Ticker", how="left")
     audusd = get_audusd()
-
     def to_aud(row):
         price = row.get("Price")
         cur = row.get("Currency")
-        if pd.isna(price):
-            return np.nan
-        if cur == "USD":
-            return price / audusd  # USD -> AUD
-        return price  # assume already AUD (ASX)
+        if pd.isna(price): return np.nan
+        return price / audusd if cur == "USD" else price
     df["Price_AUD"] = df.apply(to_aud, axis=1)
-
     df["MarketValue_AUD"] = df["Price_AUD"] * df["Quantity"]
     df["Cost_AUD"] = df["CostBasis_AUD"] * df["Quantity"]
     df["Unrealised_PnL_AUD"] = df["MarketValue_AUD"] - df["Cost_AUD"]
-
-    # Intraday % change vs PrevClose
     df["Intraday_%"] = (df["Price"] / df["PrevClose"] - 1.0) * 100.0
-
-    # Hourly % change (per ticker)
-    hourly_changes = []
-    for tk in df["Ticker"].tolist():
-        hourly_changes.append(fetch_hourly_change(tk))
-    df["Hour_%"] = hourly_changes
-
+    df["Hour_%"] = [fetch_hourly_change(tk) for tk in df["Ticker"].tolist()]
     return df
 
-# ---------- UI ----------
 st.set_page_config(page_title="Inas Investing – Live Tracker", layout="wide")
 st.title("📈 Inas Investing – Live Portfolio Tracker (Web Dashboard)")
 
@@ -173,7 +128,6 @@ with st.sidebar:
 
 holdings = load_holdings()
 
-# Editable holdings table
 edited = st.data_editor(
     holdings,
     num_rows="dynamic",
@@ -187,41 +141,45 @@ edited = st.data_editor(
     },
 )
 
-col_s1, col_s2 = st.columns([1,1])
-with col_s1:
+c1, c2 = st.columns(2)
+with c1:
     if st.button("💾 Save holdings (local file)"):
         save_holdings(edited)
         st.success("Saved to holdings.json (local session storage).")
-with col_s2:
+with c2:
     if st.button("↻ Reload from file"):
         holdings = load_holdings()
         st.rerun()
 
-# Import / Export holdings (for Streamlit Cloud persistence)
 st.markdown("### Import / Export holdings (for Streamlit Cloud)")
-col_u, col_d = st.columns(2)
-with col_u:
+u1, u2 = st.columns(2)
+with u1:
     up = st.file_uploader("Upload holdings.json", type=["json"])
     if up is not None:
         try:
             data = json.loads(up.read().decode("utf-8"))
-            edited = pd.DataFrame(data)
+            df = pd.DataFrame(data)
+            for col in ("Ticker", "Quantity", "CostBasis_AUD", "Notes"):
+                if col not in df.columns:
+                    df[col] = None
+            df["Ticker"] = df["Ticker"].astype(str)
+            for col in ("Quantity", "CostBasis_AUD"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            edited = df
             st.success("Loaded holdings from uploaded file.")
         except Exception as e:
             st.error(f"Upload failed: {e}")
-with col_d:
+with u2:
     st.download_button(
         label="Download current holdings.json",
-        data=edited.to_json(orient="list", force_ascii=False, indent=2),
+        data=df_to_json_str(edited),
         file_name="holdings.json",
         mime="application/json",
     )
 
-# Fetch quotes & compute portfolio
 quotes = fetch_quotes(edited["Ticker"].tolist())
 portfolio = compute_portfolio(edited, quotes)
 
-# Summary KPIs
 total_mv = float(portfolio["MarketValue_AUD"].sum(skipna=True))
 total_cost = float(portfolio["Cost_AUD"].sum(skipna=True))
 unreal = total_mv - total_cost
@@ -236,14 +194,11 @@ k4.metric("Last Hour Move (AUD)", f"{hour_mv:,.0f}")
 
 st.markdown("---")
 
-# Detailed table
-show_cols = [
-    "Ticker", "Quantity", "CostBasis_AUD", "Price", "Currency", "Price_AUD",
-    "MarketValue_AUD", "Unrealised_PnL_AUD", "Intraday_%", "Hour_%", "Notes"
+cols = [
+    "Ticker","Quantity","CostBasis_AUD","Price","Currency","Price_AUD",
+    "MarketValue_AUD","Unrealised_PnL_AUD","Intraday_%","Hour_%","Notes"
 ]
-fmt = portfolio[show_cols].copy()
-fmt = fmt.sort_values("MarketValue_AUD", ascending=False)
-
+fmt = portfolio[cols].copy().sort_values("MarketValue_AUD", ascending=False)
 st.subheader("Holdings detail")
 st.dataframe(fmt.style.format({
     "Quantity": "{:.6f}",
@@ -256,7 +211,6 @@ st.dataframe(fmt.style.format({
     "Hour_%": "{:.2f}%",
 }), use_container_width=True)
 
-# Mini charts: Hourly sparkline per ticker (where data available)
 st.subheader("Hourly price (last 24h)")
 for tk in fmt["Ticker"].tolist():
     try:
@@ -266,8 +220,7 @@ for tk in fmt["Ticker"].tolist():
         if hist is None or hist.empty:
             continue
         series = hist["Close"].dropna()
-        if series.empty:
-            continue
+        if series.empty: continue
         st.line_chart(series, height=150, use_container_width=True)
         st.caption(f"{tk} – hourly closes (last 24h)")
     except Exception:
