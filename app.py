@@ -11,7 +11,6 @@ AUS_TZ = pytz.timezone("Australia/Melbourne")
 
 # --- Safe JSON export helper to avoid NaN/Inf issues in downloads ---
 def df_to_json_str(df: pd.DataFrame) -> str:
-    """Convert a holdings DataFrame to a JSON string safely for download."""
     df = df.copy()
     if "Ticker" in df.columns:
         df = df[~df["Ticker"].isna() & (df["Ticker"].astype(str).str.strip() != "")]
@@ -135,8 +134,8 @@ edited = st.data_editor(
     key="holdings_editor",
     column_config={
         "Ticker": st.column_config.TextColumn(help="e.g., NDQ.AX, VGS.AX, BTC-USD"),
-        "Quantity": st.column_config.NumberColumn(format="%0.6f"),
-        "CostBasis_AUD": st.column_config.NumberColumn(help="Average entry price in AUD"),
+        "Quantity": st.column_config.NumberColumn(format="%.6f"),
+        "CostBasis_AUD": st.column_config.NumberColumn(help="Average entry price in AUD", format="%.4f"),
         "Notes": st.column_config.TextColumn(),
     },
 )
@@ -180,6 +179,12 @@ with u2:
 quotes = fetch_quotes(edited["Ticker"].tolist())
 portfolio = compute_portfolio(edited, quotes)
 
+# Coerce numeric dtypes before display to prevent formatting errors
+num_cols = ["Quantity","CostBasis_AUD","Price","Price_AUD","MarketValue_AUD","Unrealised_PnL_AUD","Intraday_%","Hour_%"]
+for c in num_cols:
+    if c in portfolio.columns:
+        portfolio[c] = pd.to_numeric(portfolio[c], errors="coerce")
+
 total_mv = float(portfolio["MarketValue_AUD"].sum(skipna=True))
 total_cost = float(portfolio["Cost_AUD"].sum(skipna=True))
 unreal = total_mv - total_cost
@@ -194,22 +199,26 @@ k4.metric("Last Hour Move (AUD)", f"{hour_mv:,.0f}")
 
 st.markdown("---")
 
-cols = [
-    "Ticker","Quantity","CostBasis_AUD","Price","Currency","Price_AUD",
-    "MarketValue_AUD","Unrealised_PnL_AUD","Intraday_%","Hour_%","Notes"
-]
+cols = ["Ticker","Quantity","CostBasis_AUD","Price","Currency","Price_AUD",
+        "MarketValue_AUD","Unrealised_PnL_AUD","Intraday_%","Hour_%","Notes"]
 fmt = portfolio[cols].copy().sort_values("MarketValue_AUD", ascending=False)
+
 st.subheader("Holdings detail")
-st.dataframe(fmt.style.format({
-    "Quantity": "{:.6f}",
-    "CostBasis_AUD": "{:.4f}",
-    "Price": "{:.4f}",
-    "Price_AUD": "{:.4f}",
-    "MarketValue_AUD": "{:,.0f}",
-    "Unrealised_PnL_AUD": "{:,.0f}",
-    "Intraday_%": "{:.2f}%",
-    "Hour_%": "{:.2f}%",
-}), use_container_width=True)
+st.dataframe(
+    fmt,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Quantity": st.column_config.NumberColumn(format="%.6f"),
+        "CostBasis_AUD": st.column_config.NumberColumn(format="%.4f"),
+        "Price": st.column_config.NumberColumn(format="%.4f"),
+        "Price_AUD": st.column_config.NumberColumn(format="%.4f"),
+        "MarketValue_AUD": st.column_config.NumberColumn(format="%.0f"),
+        "Unrealised_PnL_AUD": st.column_config.NumberColumn(format="%.0f"),
+        "Intraday_%": st.column_config.NumberColumn(format="%.2f%%"),
+        "Hour_%": st.column_config.NumberColumn(format="%.2f%%"),
+    }
+)
 
 st.subheader("Hourly price (last 24h)")
 for tk in fmt["Ticker"].tolist():
@@ -217,8 +226,7 @@ for tk in fmt["Ticker"].tolist():
         end = datetime.now(tz=pytz.UTC)
         start = end - timedelta(hours=24)
         hist = yf.download(tk, interval="1h", start=start, end=end, progress=False)
-        if hist is None or hist.empty:
-            continue
+        if hist is None or hist.empty: continue
         series = hist["Close"].dropna()
         if series.empty: continue
         st.line_chart(series, height=150, use_container_width=True)

@@ -1,5 +1,5 @@
-# Inas Investing – Web Dashboard (fixed)
-Follow README in canvas. Quick start:
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+# Inas Investing – Web Dashboard (latest fixes)
+- No Pandas Styler in table (uses Streamlit `column_config`).
+- Safe JSON export (cleans NaN/Inf and blank rows).
+- Numeric coercion before display to avoid TypeError.
+Deploy on https://share.streamlit.io with `app.py` as main file.
